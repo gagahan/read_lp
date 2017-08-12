@@ -1,11 +1,19 @@
-import os
+from datetime import datetime
+from datetime import timedelta
 
 # location = 'Z:\\Mitarbeiter\\Q-Faelle\\Kundenreparaturen\\660.9077527\\'
 location = 'C:\\Users\\florian.hofmaier\\Documents\\660.9077527\\'
 
 
-LP_START = 0x5600       # ohne vorwerte!!
+START_DATA = 0x5600       # ohne vorwerte!!
+LP_END = 0x2FFDF
 SIZE_CLUSTER = 0x200
+SIZE_LPSNINT = 1
+SIZE_TIME_STAMP = 3
+SIZE_STATUS = 4
+SIZE_DATE_STAMP = 3
+SIZE_LPNRDAY = 1
+SIZE_UNUSED_BYTE_EOC = 1
 
 SIZE_EEPROM_0 = 0x7FFF
 SIZE_EEPROM_1 = 0xFFFF
@@ -73,8 +81,12 @@ MESSGROESSE_MAP = {0x00: '--',
                    0x10: '-S',
                    0x20: '+S',
                    0x30: '+S,-S',
-                   0x40: '-P',
-                   0x80: '+P'}
+                   0x40: '-P[kW]',
+                   0x80: '+P[kW]'}
+
+
+DATE_FORMAT = '%Y%m%d%H%M%S'
+
 
 def file2List(fname, prefix):
     f = open(fname)
@@ -105,13 +117,13 @@ class LP():
         
         # read active channels
         print('check active lp channels..')
-        elpch = []
+        self.elpch = []
         self.num_of_active_channels = 0
         for adr in ELPCH:
-            elpch.append(int(m[adr], 16))
-            print('    ', hex(adr), ' elpch', len(elpch), ': ', m[adr],
-                  ' (\'', MESSGROESSE_MAP[int(m[adr], 16)], '\')', sep='')
-            if elpch[-1]:
+            self.elpch.append(int(m[adr], 16))
+            print('    ', hex(adr), ' elpch', len(self.elpch), ': ', m[adr],
+                  ' (\'', MESSGROESSE_MAP[self.elpch[-1]], '\')', sep='')
+            if self.elpch[-1]:
                 self.num_of_active_channels += 1
         print('    ....found', self.num_of_active_channels, 'active channels')
         
@@ -154,29 +166,32 @@ class LP():
             
             
         print('    type:', self.lp_type)
-        print('    entry size:', self.lp_entry_size)
+        print('    entry size: %i bytes' %self.lp_entry_size)
         print('    decimal point number:', self.lp_decimal)
                 
         # check interval size
         self.elgint = int(m[ELGINT], 16)
         print('lp interval:', self.elgint, 'min')
         
-        # check start adress for lp
+        # calc start adress for lp
         self.euisize = int(m[EUISIZE], 16)
-        start_adr = LP_START + self.euisize * SIZE_CLUSTER
+        self.lp_start = START_DATA + self.euisize * SIZE_CLUSTER
         
         # read clusters, add lp data
-        if start_adr < SIZE_EEPROM_0:
+        if self.lp_start < SIZE_EEPROM_0:
             # lp starts in first eeprom
-            print('start adress: ', hex(start_adr))
-            for cluster_adr in range(start_adr, SIZE_EEPROM_0, SIZE_CLUSTER):
+            print('start adress: ', hex(self.lp_start))
+            for cluster_adr in range(self.lp_start, SIZE_EEPROM_0, SIZE_CLUSTER):
                 self.add_data(m, cluster_adr)
             for cluster_adr in range(0x10000, 0x2FFFF, SIZE_CLUSTER):
                 self.add_data(m, cluster_adr)
         else:
-            start_adr += 0x8000
-            print('start adress: ', hex(start_adr))
-            for cluster_adr in range(start_adr, 0x2FFFF, SIZE_CLUSTER):
+            # lp starts in 2nd or 3rd eeprom
+            self.lp_start += 0x8000     # first eeprom is only 0x8000 bytes 
+                                    # instead 0xffff, therefore add offset
+                                    
+            print('start adress: ', hex(self.lp_start))
+            for cluster_adr in range(self.lp_start, 0x2FFFF, SIZE_CLUSTER):
                 self.add_data(m, cluster_adr)
             
         
@@ -202,22 +217,28 @@ class LP():
              str(stamp['dd']))
         return s
     
-    
-    def add_data(self, m, adr):
-        print('check cluster at: ', hex(adr))
+    # add cluster at given start address 
+    def add_data(self, m, start_addr):
+        print('check cluster at: ', hex(start_addr))
         
         # read all date stamps in this cluster
-        lpnrday = int(m[adr + SIZE_CLUSTER - 2], 16)
+        lpnrday = int(m[start_addr + SIZE_CLUSTER - 2], 16)
+        
+        # if lpnrday==0 indicates same stamp as in last cluster
         if lpnrday == 0:
             lpnrday += 1
+        
         list_of_dateStamps = []
         try:
             for i in range(lpnrday):
                 stamp = dict()
-                stamp['oo'] = int(m[adr + SIZE_CLUSTER - 2 - 4 * (i + 1)], 16)
-                stamp['yy'] = int(m[adr + SIZE_CLUSTER - 2 - 4 * (i + 1) + 1])
-                stamp['mm'] = int(m[adr + SIZE_CLUSTER - 2 - 4 * (i + 1) + 2])
-                stamp['dd'] = int(m[adr + SIZE_CLUSTER - 2 - 4 * (i + 1) + 3])
+                stamp['oo'] = int(m[start_addr + SIZE_CLUSTER - 2 - 4 * (i + 1)], 16)
+                stamp['yy'] = m[start_addr + SIZE_CLUSTER - 2 - 4 * (i + 1) + 1]
+                stamp['mm'] = m[start_addr + SIZE_CLUSTER - 2 - 4 * (i + 1) + 2]
+                stamp['dd'] = m[start_addr + SIZE_CLUSTER - 2 - 4 * (i + 1) + 3]
+                int(stamp['yy'])    # very dirty typecheck (cases ValueError if not BCD) 
+                int(stamp['mm'])    # very dirty typecheck (cases ValueError if not BCD)
+                int(stamp['dd'])    # very dirty typecheck (cases ValueError if not BCD)
                 list_of_dateStamps.append(stamp)
         except ValueError:
             # illegal daystamp
@@ -227,51 +248,79 @@ class LP():
         s = [self.dateStamp2Str(i) for i in list_of_dateStamps]
         print('    ..found ', lpnrday, ' date stamps: ', s)
         
+        # calculate last usable address in this cluster
+        size_date_stamps = (SIZE_UNUSED_BYTE_EOC + SIZE_LPNRDAY +
+                            SIZE_DATE_STAMP * lpnrday) 
+        max_addr = start_addr + SIZE_CLUSTER - size_date_stamps
+        
         # for every day stamp in cluster do..
         for dateStamp in list_of_dateStamps:
-            idx = adr + dateStamp['oo'] * 2
-            lpsnint = int(m[idx], 16)
             
+            # jump to start
+            idx = start_addr + dateStamp['oo'] * 2
+            
+            # read lpsnint
+            lpsnint = int(m[idx], 16)
             if lpsnint & 128:
-                entry = 'log'
+                # skip if entry is log
+                entry_type = 'log'
+                print('      %s -> type: %s ..skip' %(
+                    self.dateStamp2Str(dateStamp), entry_type))
             else:
-                entry = 'lp'
+                entry_type = 'lp'
                 
                 # read time stamp
+                idx += SIZE_LPSNINT
                 try:
-                    idx += 1
-                    hh = int(m[idx])
-                    mm = int(m[idx + 1])
-                    ss = int(m[idx + 2])
+                    hh = m[idx]
+                    mm = m[idx + 1]
+                    ss = m[idx + 2]
                 except ValueError:
-                    print('    ..!error: time stamp at', hex(idx),
-                          'is not BCD! (', m[idx], m[idx + 1],
-                          m[idx + 2], ')')
-                    print('    ..skip cluster!')
+                    print('      %s -> !error: time stamp at %s is not BCD! (%s %s %s)' 
+                          %(self.dateStamp2Str(dateStamp), hex(idx), m[idx],
+                            m[idx + 1], m[idx + 2]))
+                    print('    ..skip entry!')
                     continue
+                
+                # generate combined timeStamp (date and time)
+                s_time = ('20' + dateStamp['yy'] + dateStamp['mm'] +
+                          dateStamp['dd'] + hh + mm + ss)
+                
                 # read status byte
-                idx += 3
+                idx += SIZE_TIME_STAMP
                 status = int(m[idx], 16)
+                print('      %s -> type: %s, entries: %i, status: %i' %(
+                    s_time[:8], entry_type, lpsnint, status))
                 
                 # read all lp intervalls following this time stamp.
                 # generate a data set for every intervall
-                idx += 1
+                idx += SIZE_STATUS
                 for i in range(lpsnint):
                     dataSet = dict()
                     dataSet['status'] = status
-                    dataSet['date'] = dateStamp
+                    # dataSet['date'] = dateStamp
                     dataSet['adr'] = idx
-                    # calc time stamp for every data set
-                    dataSet['time'] = self.calcTimeStamp(
-                        (hh, mm, ss), i * self.elgint)
+                    
+                    t_diff = i * self.elgint
+                    dataSet['timeStamp'] = (datetime.strptime(s_time, DATE_FORMAT)
+                                             + timedelta(minutes = t_diff))
+
+                    # jump to the start of the next cluster if not
+                    # enough space for one entry left
+                    need = self.lp_entry_size * self.num_of_active_channels
+                    if max_addr - need < idx:
+                        idx = start_addr + SIZE_CLUSTER
+                        if idx > LP_END:
+                            idx = self.lp_start
                     
                     # read counter values
                     for ch in range(self.num_of_active_channels):
-                        dataSet[ch] = []
-                        for data in range(self.lp_entry_size):
-                            dataSet[ch].append(m[idx])
+                        dataSet[ch] = ''
+                        for __ in range(self.lp_entry_size):
+                            dataSet[ch] += (m[idx])
                             idx += 1
-                    # print(dataSet)
+                        p = self.lp_decimal
+                        dataSet[ch] = dataSet[ch][:p] + '.' + dataSet[ch][p:]
                     self.lp.append(dataSet)
         
         
@@ -279,15 +328,15 @@ class LP():
         pass
 
     def __str__(self):
-        s = ''
+        s = 'adr;time;'
+        for i in range(self.num_of_active_channels):
+            s += MESSGROESSE_MAP[self.elpch[i]] + ';'
+        s += 'status\n'
         for d in self.lp:
-            s += (str(hex(d['adr'])) + ': ' + str(d['date']['yy']) + 
-                '/' + str(d['date']['mm']) + '/' + 
-                str(d['date']['dd']) + ' ' + str(d['time']['hh']) + ':' + 
-                str(d['time']['mm']) + ':' + str(d['time']['ss']) + ' ')
+            s += (str(hex(d['adr'])) + ';' + str(d['timeStamp']) + ';')
             for i in range(self.num_of_active_channels):
-                s += str(d[i]) + ' '
-            s += ' ' + 'status: ' + str(d['status']) + '\r'
+                s += str(d[i]) + ';'
+            s += str(d['status']) + '\r'
                 
         return s
 
@@ -310,4 +359,5 @@ if __name__ == '__main__':
     
     # create lp
     lp = LP(m)
-    print(lp)
+    f = open('lp.csv', 'w')
+    f.write(str(lp))
