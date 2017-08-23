@@ -497,17 +497,17 @@ if __name__ == '__main__':
         fname = args.output
     else:
         # read serial
-        sn = (chr(int(eeprom_data[0x7A9])) +
-              chr(int(eeprom_data[0x7AA])) +
-              chr(int(eeprom_data[0x7AB])) +
-              chr(int(eeprom_data[0x7AC])) +
-              chr(int(eeprom_data[0x7AD])) +
-              chr(int(eeprom_data[0x7AE])) +
-              chr(int(eeprom_data[0x7AF])) +
-              chr(int(eeprom_data[0x7B0])))
+        sn = (chr(int(eeprom_data[0x7A9], 16)) +
+              chr(int(eeprom_data[0x7AA], 16)) +
+              chr(int(eeprom_data[0x7AB], 16)) +
+              chr(int(eeprom_data[0x7AC], 16)) +
+              chr(int(eeprom_data[0x7AD], 16)) +
+              chr(int(eeprom_data[0x7AE], 16)) +
+              chr(int(eeprom_data[0x7AF], 16)) +
+              chr(int(eeprom_data[0x7B0], 16)))
         
         fname = output_file.replace('serial', sn)
-
+    
     f = open(fname, 'w')
     print('write lp to %s' %fname)
     f.write(str(lp))
