@@ -3,11 +3,7 @@ import sys
 
 from datetime import datetime
 from datetime import timedelta
-
-
-# location = 'Z:\\Mitarbeiter\\Q-Faelle\\Kundenreparaturen\\660.9077527\\'
-#location = 'C:\\Users\\florian.hofmaier\\Documents\\660.9077527\\'
-location = ''
+from _datetime import date
 
 
 # constants --------------------------------------------------------------------
@@ -97,10 +93,10 @@ MESSGROESSE_MAP = {0x00: '--',
                    0x80: '+P[kW]'}
 
 
-DATE_FORMAT = '%Y%m%d%H%M%S'
+DATE_FORMAT = '%y%m%d%H%M%S'
 
-log_file = 'read_lp.log'
-output_file = 'serial.lp'
+log_file = 'read_lp.time.log'
+output_file = 'serial.csv'
 
 
 # file logger  -----------------------------------------------------------------
@@ -109,7 +105,8 @@ class Logger(object):
     def __init__(self, file_name, verbose=False):
         self.verbose = verbose
         self.terminal = sys.stdout
-        self.log = open(file_name, "w")
+        now = datetime.now().strftime(DATE_FORMAT)
+        self.log = open(file_name.replace('time', now), "w")
 
     def write(self, message):
         if self.verbose:
@@ -330,8 +327,8 @@ class LP():
         
         # read all date stamps in this cluster
         cluster['dateStamps'] = []
-        try:
-            for i in range(lpnrday):
+        for i in range(lpnrday):
+            try:
                 date_stamp = {}
                 
                 adr_date_stamp = adr_cluster + SIZE_CLUSTER - 2 - 4 * (i + 1)
@@ -345,26 +342,34 @@ class LP():
                 date_stamp['date'] = datetime(year, month, day)
                 cluster['dateStamps'].append(date_stamp)
         
-        except ValueError:
-            # illegal daystamp, return without value
-            print('    !error: daystamp is not bcd !')
-            print('    skip cluster..')
-            return None
+            except ValueError:
+                # illegal daystamp, return without value
+                print('    !error: daystamp is not bcd !')
+                print('    skip daystamp..')
         
         # calculate last usable address in this cluster
         size_date_stamps = (SIZE_UNUSED_BYTE_EOC + (SIZE_LPNRDAY +
                             SIZE_DATE_STAMP) * lpnrday)
         
+        # for lp entries.. 
         last_adr = (adr_cluster + SIZE_CLUSTER - size_date_stamps -
-                    self.size_lp_entry - SIZE_UNUSED_BYTE_EOC)
+                    SIZE_UNUSED_BYTE_EOC - self.size_lp_entry)
 
         cluster['last_adr'] = last_adr
+        
+        # and for time stamps to..
+        last_adr_ts = (adr_cluster + SIZE_CLUSTER - size_date_stamps -
+                       SIZE_UNUSED_BYTE_EOC - SIZE_TIME_STAMP - SIZE_STATUS -
+                       SIZE_LPSNINT)
+        
+        cluster['last_adr_ts'] = last_adr_ts
         
         print('    lpnrday: %i' %cluster['lpnrday'])
         for ds in cluster['dateStamps']:
             print('    dateStamp: %s, offset: %s' %(ds['date'].date(),
                                                     hex(ds['offs'])))
-        print('    last uable address: %s' %hex(cluster['last_adr']))
+        print('    last usable address for lp entries: %s' %hex(cluster['last_adr']))
+        print('    last usable address for time stamps: %s' %hex(cluster['last_adr_ts']))
         
         return cluster
     
@@ -376,11 +381,25 @@ class LP():
         
         # read lp data for every cluster with one or more date stamps
         for cluster in self.clusters:
+
+            open_cluster = cluster  # this pointer is used to read over the
+                                    # cluster end into next cluster..            
             
             for dateStamp in cluster['dateStamps']:
             
                 # jump to start of entry
                 idx = cluster['first_adr'] + dateStamp['offs'] * 2
+                
+                
+                # jump to the start of the next cluster if not
+                # enough space for one time stamp is left
+                if idx > open_cluster['last_adr_ts']:
+                    open_cluster = open_cluster['next_cluster']
+                    if open_cluster:
+                        idx = open_cluster['first_adr']
+                    else:
+                        # this was the last cluster
+                        return               
                 
                 # read lpsnint
                 lpsnint = int(self.eeprom_data[idx], 16)
@@ -399,6 +418,9 @@ class LP():
                     hh = int(self.eeprom_data[idx])
                     mm = int(self.eeprom_data[idx + 1])
                     ss = int(self.eeprom_data[idx + 2])
+                    print('      time stamp at %s: %i:%i:%i'
+                          %(hex(idx), hh , mm, ss))
+                    
                 except ValueError:
                     # time stamp is invalid
                     print('      %s time stamp at is not BCD! (%s %s %s) -> skip entry..' 
@@ -410,6 +432,7 @@ class LP():
                 
                 # generate time delta
                 t_diff = timedelta(hours=hh, minutes=mm, seconds=ss)
+                print('    t_delta: %s' %t_diff)
                 
                 # read status byte
                 idx += SIZE_TIME_STAMP
@@ -425,17 +448,13 @@ class LP():
                 # read all lp intervalls following this time stamp.
                 # generate a data set for every intervall
                 
-                open_cluster = cluster  # this pointer is used to read over
-                                        # cluster end into next cluster..
-                
                 for i in range(lpsnint):
                     dataSet = {}
     
-                    dataSet['status'] =     status
+                    dataSet['status'] = status
                     
-                    t_diff = timedelta(minutes=i * self.elgint)
                     dataSet['timeStamp'] = dateStamp['date'] + t_diff
-            
+                    t_diff += timedelta(minutes=self.elgint)
             
                     # jump to the start of the next cluster if not
                     # enough space for one entry left
@@ -508,8 +527,11 @@ if __name__ == '__main__':
         
         fname = output_file.replace('serial', sn)
     
-    f = open(fname, 'w')
-    print('write lp to %s' %fname)
-    f.write(str(lp))
-
+    try:
+        f = open(fname, 'w')
+        print('write lp to %s' %fname)
+        f.write(str(lp))
+    except PermissionError:
+        sys.stderr.write('error: permission denied "%s"\n' %fname)
+        sys.exit('abort program..')
 
