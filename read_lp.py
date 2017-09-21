@@ -3,11 +3,12 @@ import sys
 
 from datetime import datetime
 from datetime import timedelta
-from _datetime import date
+
 
 
 # constants --------------------------------------------------------------------
-START_DATA = 0x5600       # mit vorwerte!!
+START_DATA_0 = 0x1E00       # ohne Vorwerte
+START_DATA_1 = 0x5600       # mit Vorwerte
 LP_END = 0x2FFDF
 SIZE_CLUSTER = 0x200
 SIZE_LPSNINT = 1
@@ -21,17 +22,18 @@ SIZE_EEPROM_0 = 0x7FFF + 1
 SIZE_EEPROM_1 = 0xFFFF + 1
 SIZE_EEPROM_2 = 0xFFFF + 1
 
+N_CLUSTERS = 256
 LAST_CLUSTER_EEPROM_0 = 0x07FE0
-LAST_CLUSTER_EEPROM_1 = 0x1FFE0
-LAST_CLUSTER_EEPROM_2 = 0x2FFE0
 
 DISFLG = 0x051B
 
 ELPSMOD = 0x0789
 
-ELGINT = 0x078E     # LP interval
+ELGINT = 0x078E             # LP interval
 
 EUISIZE = 0x079A
+
+PERSO = 0x04B0
 
 DPLOCE = 0x04C1
 DPLOCD = 0x04C2
@@ -41,9 +43,14 @@ DISFLG_DD = 0b00110000
 DISFLG_CC = 0b00001100
 DPLOCE_DDD = 0b00000011
 DPLOCD_DDD = 0b00000011
+
+ELPSMOD_LPRAPE = 0b10000000
 ELPSMOD_LPREGS = 0b00100000
 ELPSMOD_LPENER = 0b00010000
+ELPSMOD_LPRVS = 0b00001000
+ELPSMOD_LPVSET = 0b00000001
 
+PERSO_MS = 0b00000001
 
 ELPCH = (0x0787,
          0x0788,
@@ -53,8 +60,6 @@ ELPCH = (0x0787,
          0x078D,
          0x0790,
          0x0791)
-
-
 
 
 N_DIGITS_EREGS = {0b00: 8,
@@ -94,6 +99,7 @@ MESSGROESSE_MAP = {0x00: '--',
 
 
 DATE_FORMAT = '%y%m%d%H%M%S'
+DATE_FORMAT_NO_TIME = '%Y-%m-%d'
 
 log_file = 'read_lp.time.log'
 output_file = 'serial.csv'
@@ -205,6 +211,41 @@ class EepromData(dict):
                 'use option "-i" to ignore invalid data.\n')
 
 
+# converter for status byte  ---------------------------------------------------
+class StatusByte():
+    
+    def __init__(self, status_byte, elpsmod):
+        
+        self.status = status_byte
+        self.msg = {}
+        self.msg[0] = 'fatale(r) Fehler'
+        self.msg[1] = 'Uhrzeit verloren'
+        self.msg[2] = 'Messperiode gestoert'
+        self.msg[3] = 'Zeitumstellung Sommer/Winter'
+        self.msg[4] = 'neues Intervall wegen Maximumrueckstellung'
+        self.msg[5] = 'Datum/Uhrzeit geaendert'
+        self.msg[6] = 'Spannungsrueckkehr'
+        self.msg[7] = 'Spannungsausfall'
+
+        if elpsmod & ELPSMOD_LPRVS:
+            self.msg[3] += ' / Ruecklauferkennung'
+        if elpsmod & ELPSMOD_LPRAPE:
+            self.msg[4] += ' / Spannungsausfall in 1 oder 2 Phasen' 
+        if elpsmod & ELPSMOD_LPVSET:
+            self.msg[6] += ' / Konfigurationsaenderung'
+        
+        
+    def __str__(self):
+        s = ''
+        for bit in range(8):
+            bit_mask = 1 << bit
+            if self.status & bit_mask:
+                s += self.msg[bit] + ', '
+        if s[-2:] == ', ':
+            s = s[:-2]
+        return s
+     
+        
 # load profile -----------------------------------------------------------------
 class LP():
     
@@ -214,7 +255,7 @@ class LP():
         # read lp parameters from eeprom data
         self.read_lp_rarameters()
         
-        # generate cluster info
+        # generate cluster information
         print('\ngenerate cluster info...')
         self.clusters = []
         
@@ -223,11 +264,11 @@ class LP():
             for adr in range(self.lp_start, LAST_CLUSTER_EEPROM_0, SIZE_CLUSTER):
                 self.clusters += filter(None, [self.create_cluster(adr)])
         # for 2nd and 3rd eeprom
-        for adr in range(self.lp_start, LAST_CLUSTER_EEPROM_2, SIZE_CLUSTER):
+        for adr in range(self.lp_start, self.lp_stop, SIZE_CLUSTER):
             self.clusters += filter(None, [self.create_cluster(adr)])
         
         # link clusters
-        self.clusters[-1]['next_cluster'] = None
+        self.clusters[-1]['next_cluster'] = self.clusters[0]
         for i in range(len(self.clusters) - 1):
             self.clusters[i]['next_cluster'] = self.clusters[i+1] 
             
@@ -239,6 +280,7 @@ class LP():
     
     
     def read_lp_rarameters(self):
+        
         # read active channels
         print('\ncheck active lp channels..')
         self.elpch = []
@@ -266,9 +308,12 @@ class LP():
         # nachkommastellen leistungsregister
         self.dplocd_ddd = int(self.eeprom_data[DPLOCD], 16) & DPLOCD_DDD
         
+        # read elpsmod (byte3 class5)
+        self.elpsmod = int(self.eeprom_data[ELPSMOD], 16)
+        
         # read lp data type and define format
-        self.elpsmod_lpregs = int(self.eeprom_data[ELPSMOD], 16) & ELPSMOD_LPREGS
-        self.elpsmod_lpener = int(self.eeprom_data[ELPSMOD], 16) & ELPSMOD_LPENER
+        self.elpsmod_lpregs = self.elpsmod & ELPSMOD_LPREGS
+        self.elpsmod_lpener = self.elpsmod & ELPSMOD_LPENER
         if self.elpsmod_lpregs:
             self.lp_type = 'Energieregister'
             self.size_lp_channel = (N_DIGITS_EREGS[self.disflg_ee] + 2 // 2) // 2
@@ -288,8 +333,9 @@ class LP():
             self.size_lp_channel = (N_DIGITS_PWR[self.disflg_dd] + 2 // 2) // 2
             self.lp_decimal = self.dplocd_ddd
         
+        # calculate size of lp entry
         self.size_lp_entry = self.size_lp_channel * self.num_of_active_channels
-            
+    
         print('    type:', self.lp_type)
         print('    size per channel: %i bytes' %self.size_lp_channel)
         print('    decimal point number: %i' %self.lp_decimal)
@@ -300,16 +346,29 @@ class LP():
         self.elgint = int(self.eeprom_data[ELGINT], 16)
         print('    lp interval:', self.elgint, 'min')
         
+        # check if vorwertebildung active
+        self.perso_ms = int(self.eeprom_data[PERSO], 16) & PERSO_MS
+        
         # calc start adress for lp
         print('\ncheck start address for load profile')
+        if self.perso_ms:
+            self.np_start = START_DATA_1
+        else:
+            self.np_start = START_DATA_0
         self.euisize = int(self.eeprom_data[EUISIZE], 16)
-        self.lp_start = START_DATA + self.euisize * SIZE_CLUSTER
+        self.lp_start = self.np_start + self.euisize * SIZE_CLUSTER
         # first eeprom is only 0x8000 bytes
         # for that reason add an offset if lp starts in 2nd or 3rd eeprom
         if self.lp_start >= SIZE_EEPROM_0:
             self.lp_start += SIZE_EEPROM_0
-        
         print('    start address: %s' %hex(self.lp_start))
+        
+        # calc last adress for lp
+        print('\ncheck last address')
+        eeprom0 = SIZE_EEPROM_0 - self.np_start
+        self.lp_stop  = ((N_CLUSTERS-1) * 512 - eeprom0 - SIZE_EEPROM_1) + \
+                        0x20000 - 1
+        print('    last address: %s' %hex(self.lp_stop))
 
 
 
@@ -327,26 +386,30 @@ class LP():
         
         # read all date stamps in this cluster
         cluster['dateStamps'] = []
-        for i in range(lpnrday):
-            try:
-                date_stamp = {}
-                
-                adr_date_stamp = adr_cluster + SIZE_CLUSTER - 2 - 4 * (i + 1)
-                
-                offs = int(eeprom_data[adr_date_stamp], 16)
-                year = int('20' + eeprom_data[adr_date_stamp+1])
-                month = int(eeprom_data[adr_date_stamp+2])
-                day = int(eeprom_data[adr_date_stamp+3])
-                
-                date_stamp['offs'] = offs
-                date_stamp['date'] = datetime(year, month, day)
-                cluster['dateStamps'].append(date_stamp)
         
-            except ValueError:
-                # illegal daystamp, return without value
-                print('    !error: daystamp is not bcd !')
-                print('    skip daystamp..')
-        
+        if lpnrday not in (0x55, 0xAA, 0xFF):
+            
+            for i in range(lpnrday):
+                
+                try:
+                    date_stamp = {}
+                    
+                    adr_date_stamp = adr_cluster + SIZE_CLUSTER - 2 - 4 * (i + 1)
+                    
+                    offs = int(eeprom_data[adr_date_stamp], 16)
+                    year = int('20' + eeprom_data[adr_date_stamp+1])
+                    month = int(eeprom_data[adr_date_stamp+2])
+                    day = int(eeprom_data[adr_date_stamp+3])
+                    
+                    date_stamp['offs'] = offs
+                    date_stamp['date'] = datetime(year, month, day)
+                    cluster['dateStamps'].append(date_stamp)
+            
+                except ValueError:
+                    # illegal daystamp, return without value
+                    print('    !error: daystamp is not bcd !')
+                    print('    skip daystamp..')
+            
         # calculate last usable address in this cluster
         size_date_stamps = (SIZE_UNUSED_BYTE_EOC + (SIZE_LPNRDAY +
                             SIZE_DATE_STAMP) * lpnrday)
@@ -365,6 +428,7 @@ class LP():
         cluster['last_adr_ts'] = last_adr_ts
         
         print('    lpnrday: %i' %cluster['lpnrday'])
+        
         for ds in cluster['dateStamps']:
             print('    dateStamp: %s, offset: %s' %(ds['date'].date(),
                                                     hex(ds['offs'])))
@@ -385,10 +449,13 @@ class LP():
             open_cluster = cluster  # this pointer is used to read over the
                                     # cluster end into next cluster..            
             
+            print('read cluster at: %s..' %hex(cluster['first_adr']))
             for dateStamp in cluster['dateStamps']:
             
                 # jump to start of entry
                 idx = cluster['first_adr'] + dateStamp['offs'] * 2
+                print('    datestamp: %s' 
+                      %dateStamp['date'].strftime(DATE_FORMAT_NO_TIME))
                 
                 
                 # jump to the start of the next cluster if not
@@ -415,11 +482,10 @@ class LP():
                 # read time stamp
                 idx += SIZE_LPSNINT
                 try:
-                    hh = int(self.eeprom_data[idx])
+                    hh = int(self.eeprom_data[idx], 16) & 127
                     mm = int(self.eeprom_data[idx + 1])
                     ss = int(self.eeprom_data[idx + 2])
-                    print('      time stamp at %s: %i:%i:%i'
-                          %(hex(idx), hh , mm, ss))
+
                     
                 except ValueError:
                     # time stamp is invalid
@@ -432,7 +498,8 @@ class LP():
                 
                 # generate time delta
                 t_diff = timedelta(hours=hh, minutes=mm, seconds=ss)
-                print('    t_delta: %s' %t_diff)
+                print('        timestamp: %s at adr: %s / %i entries'
+                       %(t_diff, hex(idx), lpsnint))
                 
                 # read status byte
                 idx += SIZE_TIME_STAMP
@@ -441,17 +508,11 @@ class LP():
                 # read all lp intervalls following this time stamp.
                 # generate a data set for every intervall
                 idx += SIZE_STATUS
-                for i in range(lpsnint):
-                    dataSet = {}
-                    dataSet['status'] = status
-                                    
-                # read all lp intervalls following this time stamp.
-                # generate a data set for every intervall
                 
-                for i in range(lpsnint):
+                for __ in range(lpsnint):
                     dataSet = {}
     
-                    dataSet['status'] = status
+                    dataSet['status'] = str(StatusByte(status, self.elpsmod))
                     
                     dataSet['timeStamp'] = dateStamp['date'] + t_diff
                     t_diff += timedelta(minutes=self.elgint)
